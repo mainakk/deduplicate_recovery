@@ -1,0 +1,5 @@
+{
+  "source_dir": "./recovered_pdfs",
+  "destination_dir": "./deduplicated_pdfs",
+  "hash_cache_path": "./pdf_hash_cache.sqlite3"
+}
