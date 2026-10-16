@@ -47,6 +47,12 @@ class DeduplicationTests(unittest.TestCase):
 
         report = run_deduplication(self.config(), output)
 
+        self.assertEqual(report["source_total_bytes"], 38)
+        self.assertEqual(report["unique_total_bytes"], 26)
+        self.assertEqual(report["copied_total_bytes"], 26)
+        self.assertIn("Source: 3 PDFs, 38 bytes.", output.getvalue())
+        self.assertIn("Unique: 2 PDFs, 26 bytes (would save 12 bytes).", output.getvalue())
+        self.assertIn("Copyable: 2 PDFs, 26 bytes.", output.getvalue())
         duplicate_group = next(
             group for group in report["groups"] if group["duplicates"]
         )

@@ -336,20 +336,7 @@ def run_deduplication(
     }
 
     if dry_run:
-        print(
-            f"Source: {len(pdfs)} PDFs, {report['source_total_bytes']} bytes.",
-            file=progress_stream,
-        )
-        print(
-            f"Unique: {len(report_groups)} PDFs, {report['unique_total_bytes']} bytes "
-            f"(would save {report['source_total_bytes'] - report['unique_total_bytes']} bytes).",
-            file=progress_stream,
-        )
-        print(
-            f"Copyable: {report['copied_pdf_count']} PDFs, "
-            f"{report['copied_total_bytes']} bytes.",
-            file=progress_stream,
-        )
+        _print_size_summary(report, progress_stream)
         print("Dry run: no files copied and no JSON report written.", file=progress_stream)
         _print_collisions(collisions, progress_stream)
         return report
@@ -405,6 +392,7 @@ def run_deduplication(
         f"Copied {report['copied_pdf_count']} unique PDFs to {config.destination_dir}.",
         file=progress_stream,
     )
+    _print_size_summary(report, progress_stream)
     print(f"Report written to {config.report_path}.", file=progress_stream)
     _print_collisions(collisions, progress_stream)
     return report
@@ -420,6 +408,25 @@ def _print_collisions(collisions: list[dict], stream: TextIO) -> None:
             f"  {collision['copied_to']}: {', '.join(collision['source_paths'])}",
             file=stream,
         )
+
+
+def _print_size_summary(report: dict, stream: TextIO) -> None:
+    print(
+        f"Source: {report['source_pdf_count']} PDFs, "
+        f"{report['source_total_bytes']} bytes.",
+        file=stream,
+    )
+    print(
+        f"Unique: {report['unique_count']} PDFs, {report['unique_total_bytes']} bytes "
+        f"(would save "
+        f"{report['source_total_bytes'] - report['unique_total_bytes']} bytes).",
+        file=stream,
+    )
+    print(
+        f"Copyable: {report['copied_pdf_count']} PDFs, "
+        f"{report['copied_total_bytes']} bytes.",
+        file=stream,
+    )
 
 
 def main() -> int:

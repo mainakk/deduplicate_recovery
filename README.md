@@ -37,6 +37,8 @@ savings. It does not create copies or write the JSON report; it does update the
 hash cache so later runs can reuse computed hashes. The configured destination
 may already exist during a dry run. Dry-run output also lists every resulting
 filename collision and reports how many unique files can be copied safely.
+Normal runs print the same source/unique/copyable size summary after copying,
+in addition to storing these totals in the JSON report.
 
 The verifier uses the same config and report to compare every source PDF with
 the report and copied file, confirm hash groups and deterministic names, and
