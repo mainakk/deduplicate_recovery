@@ -15,6 +15,7 @@ from deduplicate import (
     discover_pdfs,
     hash_file,
     load_config,
+    MAX_PDF_SIZE_BYTES,
     output_name_for,
 )
 
@@ -56,6 +57,8 @@ def _destination_files(directory: Path) -> set[str]:
 
 def verify_report(config: Config) -> int:
     report = _load_report(config.report_path)
+    if report.get("dry_run") is True:
+        raise VerificationError("Dry-run reports describe planned output, not copied files")
     if report.get("schema_version") != 1 or report.get("algorithm") != "sha256":
         raise VerificationError("Unsupported report schema or hash algorithm")
     if report.get("source_dir") != str(config.source_dir):
@@ -66,17 +69,39 @@ def verify_report(config: Config) -> int:
         raise VerificationError(f"Destination directory does not exist: {config.destination_dir}")
 
     source_paths = discover_pdfs(config.source_dir)
-    source_by_relative = {
-        path.relative_to(config.source_dir).as_posix(): hash_file(path)
-        for path in source_paths
-    }
-    source_sizes = {
+    source_sizes_all = {
         path.relative_to(config.source_dir).as_posix(): path.stat().st_size
         for path in source_paths
+    }
+    outlier_paths = {
+        relative: size
+        for relative, size in source_sizes_all.items()
+        if size > MAX_PDF_SIZE_BYTES
+    }
+    eligible_paths = set(source_sizes_all) - set(outlier_paths)
+    source_by_relative = {
+        relative: hash_file(config.source_dir / relative)
+        for relative in eligible_paths
+    }
+    source_sizes = {
+        relative: source_sizes_all[relative] for relative in eligible_paths
     }
     groups = report.get("groups")
     if not isinstance(groups, list):
         raise VerificationError("Report groups must be a JSON array")
+    outliers = report.get("outliers")
+    if not isinstance(outliers, list):
+        raise VerificationError("Report outliers must be a JSON array")
+    expected_outliers = [
+        {"path": relative, "size_bytes": size}
+        for relative, size in sorted(outlier_paths.items())
+    ]
+    if outliers != expected_outliers:
+        raise VerificationError("Reported oversized PDFs do not match the source")
+    if report.get("outlier_count") != len(expected_outliers):
+        raise VerificationError("outlier_count does not match the source inventory")
+    if report.get("outlier_total_bytes") != sum(outlier_paths.values()):
+        raise VerificationError("outlier_total_bytes does not match the source inventory")
 
     reported_sources: set[str] = set()
     reported_destinations: set[str] = set()
@@ -206,12 +231,16 @@ def verify_report(config: Config) -> int:
         )
     if report.get("source_pdf_count") != len(source_paths):
         raise VerificationError("source_pdf_count does not match the source inventory")
+    if report.get("eligible_pdf_count") != len(eligible_paths):
+        raise VerificationError("eligible_pdf_count does not match the source inventory")
+    if report.get("eligible_total_bytes") != sum(source_sizes.values()):
+        raise VerificationError("eligible_total_bytes does not match the source inventory")
+    if report.get("source_total_bytes") != sum(source_sizes_all.values()):
+        raise VerificationError("source_total_bytes does not match the source inventory")
     if report.get("unique_count") != len(groups):
         raise VerificationError("unique_count does not match the report groups")
-    if report.get("duplicate_count") != len(source_paths) - len(groups):
+    if report.get("duplicate_count") != len(eligible_paths) - len(groups):
         raise VerificationError("duplicate_count does not match the source inventory")
-    if report.get("source_total_bytes") != sum(source_sizes.values()):
-        raise VerificationError("source_total_bytes does not match the source inventory")
     expected_unique_bytes = sum(
         source_sizes[group["copied_from"]] for group in groups
     )

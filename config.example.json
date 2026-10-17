@@ -1,5 +1,6 @@
 {
   "source_dir": "./recovered_pdfs",
   "destination_dir": "./deduplicated_pdfs",
+  "dry_run_report_path": "./deduplication_dry_run_report.json",
   "hash_cache_path": "./pdf_hash_cache.sqlite3"
 }

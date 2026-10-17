@@ -19,6 +19,7 @@ DEFAULT_REPORT_NAME = "deduplication_report.json"
 DEFAULT_CACHE_NAME = "pdf_hash_cache.sqlite3"
 PROGRESS_INTERVAL = 100
 CHUNK_SIZE = 1024 * 1024
+MAX_PDF_SIZE_BYTES = 500_000_000
 
 
 class ConfigurationError(ValueError):
@@ -30,6 +31,7 @@ class Config:
     source_dir: Path
     destination_dir: Path
     report_path: Path
+    dry_run_report_path: Path
     hash_cache_path: Path
 
 
@@ -55,7 +57,13 @@ def load_config(
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"{config_path} must contain a JSON object")
-    allowed = {"source_dir", "destination_dir", "report_path", "hash_cache_path"}
+    allowed = {
+        "source_dir",
+        "destination_dir",
+        "report_path",
+        "dry_run_report_path",
+        "hash_cache_path",
+    }
     unknown = set(data) - allowed
     if unknown:
         raise ConfigurationError(
@@ -74,6 +82,9 @@ def load_config(
     source_dir = configured_path("source_dir")
     destination_dir = configured_path("destination_dir")
     report_path = configured_path("report_path", cwd / DEFAULT_REPORT_NAME)
+    dry_run_report_path = configured_path(
+        "dry_run_report_path", cwd / "deduplication_dry_run_report.json"
+    )
     hash_cache_path = configured_path("hash_cache_path", cwd / DEFAULT_CACHE_NAME)
     config_resolved = config_path.resolve()
 
@@ -97,6 +108,28 @@ def load_config(
         raise ConfigurationError("report_path must not overwrite config.json")
     if report_path.exists() and report_path.is_dir():
         raise ConfigurationError(f"report_path is a directory: {report_path}")
+    if _is_within(dry_run_report_path, source_dir):
+        raise ConfigurationError("dry_run_report_path must be outside source_dir")
+    if _is_within(dry_run_report_path, destination_dir) or _is_within(
+        destination_dir, dry_run_report_path
+    ):
+        raise ConfigurationError(
+            "dry_run_report_path and destination_dir must not overlap"
+        )
+    if (
+        dry_run_report_path == report_path
+        or _is_within(dry_run_report_path, report_path)
+        or _is_within(report_path, dry_run_report_path)
+    ):
+        raise ConfigurationError(
+            "dry_run_report_path and report_path must not overlap"
+        )
+    if dry_run_report_path == config_resolved:
+        raise ConfigurationError("dry_run_report_path must not overwrite config.json")
+    if dry_run_report_path.exists() and dry_run_report_path.is_dir():
+        raise ConfigurationError(
+            f"dry_run_report_path is a directory: {dry_run_report_path}"
+        )
     if _is_within(hash_cache_path, source_dir):
         raise ConfigurationError("hash_cache_path must be outside source_dir")
     if _is_within(hash_cache_path, destination_dir) or _is_within(
@@ -107,6 +140,12 @@ def load_config(
         report_path, hash_cache_path
     ):
         raise ConfigurationError("hash_cache_path and report_path must not overlap")
+    if _is_within(hash_cache_path, dry_run_report_path) or _is_within(
+        dry_run_report_path, hash_cache_path
+    ):
+        raise ConfigurationError(
+            "hash_cache_path and dry_run_report_path must not overlap"
+        )
     if hash_cache_path == config_resolved:
         raise ConfigurationError("hash_cache_path must not overwrite config.json")
     if hash_cache_path.exists() and hash_cache_path.is_dir():
@@ -115,7 +154,13 @@ def load_config(
         raise ConfigurationError(
             f"destination_dir already exists; choose a new, empty path: {destination_dir}"
         )
-    return Config(source_dir, destination_dir, report_path, hash_cache_path)
+    return Config(
+        source_dir,
+        destination_dir,
+        report_path,
+        dry_run_report_path,
+        hash_cache_path,
+    )
 
 
 def discover_pdfs(source_dir: Path) -> list[Path]:
@@ -272,21 +317,42 @@ def run_deduplication(
     dry_run: bool = False,
 ) -> dict:
     pdfs = discover_pdfs(config.source_dir)
+    if dry_run:
+        print(f"Dry run: scanning {len(pdfs)} PDFs...", file=progress_stream, flush=True)
     groups: dict[str, list[str]] = {}
     sizes: dict[str, int] = {}
+    outliers: list[dict] = []
+    eligible_processed = 0
+    last_progress_count = 0
     with HashCache(config.hash_cache_path) as cache:
         for index, path in enumerate(pdfs, start=1):
             relative = path.relative_to(config.source_dir).as_posix()
-            digest, size = cache.get_or_compute(path)
-            groups.setdefault(digest, []).append(relative)
-            sizes[relative] = size
+            size = path.stat().st_size
+            if size > MAX_PDF_SIZE_BYTES:
+                outliers.append({"path": relative, "size_bytes": size})
+            else:
+                digest, size = cache.get_or_compute(path)
+                groups.setdefault(digest, []).append(relative)
+                sizes[relative] = size
+                eligible_processed += 1
             if index % PROGRESS_INTERVAL == 0:
-                duplicates = index - len(groups)
+                duplicates = eligible_processed - len(groups)
                 print(
                     f"Processed {index}/{len(pdfs)} PDFs; deduplicated {duplicates}; "
                     f"remaining {len(pdfs) - index}.",
                     file=progress_stream,
+                    flush=True,
                 )
+                last_progress_count = index
+
+    if dry_run and len(pdfs) != last_progress_count:
+        duplicates = eligible_processed - len(groups)
+        print(
+            f"Processed {len(pdfs)}/{len(pdfs)} PDFs; deduplicated {duplicates}; "
+            "remaining 0.",
+            file=progress_stream,
+            flush=True,
+        )
 
     name_to_sources: dict[str, list[str]] = {}
     for relatives in groups.values():
@@ -314,15 +380,31 @@ def run_deduplication(
             }
         )
 
+    print(
+        f"Hashing complete: {eligible_processed} PDFs hashed; "
+        f"{len(report_groups)} unique content groups identified; "
+        f"{len(outliers)} oversized outliers skipped.",
+        file=progress_stream,
+        flush=True,
+    )
+
     report = {
         "schema_version": 1,
         "algorithm": "sha256",
+        "dry_run": dry_run,
         "source_dir": str(config.source_dir),
         "destination_dir": str(config.destination_dir),
         "source_pdf_count": len(pdfs),
+        "source_total_bytes": sum(sizes.values()) + sum(
+            item["size_bytes"] for item in outliers
+        ),
+        "eligible_pdf_count": len(pdfs) - len(outliers),
+        "eligible_total_bytes": sum(sizes.values()),
+        "outlier_count": len(outliers),
+        "outlier_total_bytes": sum(item["size_bytes"] for item in outliers),
+        "outliers": outliers,
         "unique_count": len(report_groups),
-        "duplicate_count": len(pdfs) - len(report_groups),
-        "source_total_bytes": sum(sizes.values()),
+        "duplicate_count": len(sizes) - len(report_groups),
         "unique_total_bytes": sum(sizes[group["copied_from"]] for group in report_groups),
         "copied_pdf_count": sum(not group["filename_collision"] for group in report_groups),
         "copied_total_bytes": sum(
@@ -336,8 +418,14 @@ def run_deduplication(
     }
 
     if dry_run:
+        _print_outliers(outliers, progress_stream)
         _print_size_summary(report, progress_stream)
-        print("Dry run: no files copied and no JSON report written.", file=progress_stream)
+        _write_report(config.dry_run_report_path, report)
+        print("Dry run: no files copied.", file=progress_stream)
+        print(
+            f"Dry-run report written to {config.dry_run_report_path}.",
+            file=progress_stream,
+        )
         _print_collisions(collisions, progress_stream)
         return report
 
@@ -385,7 +473,7 @@ def run_deduplication(
 
     print(
         f"Processed {len(pdfs)}/{len(pdfs)} PDFs; deduplicated "
-        f"{len(pdfs) - len(report_groups)}; remaining 0.",
+        f"{eligible_processed - len(report_groups)}; remaining 0.",
         file=progress_stream,
     )
     print(
@@ -394,6 +482,7 @@ def run_deduplication(
     )
     _print_size_summary(report, progress_stream)
     print(f"Report written to {config.report_path}.", file=progress_stream)
+    _print_outliers(outliers, progress_stream)
     _print_collisions(collisions, progress_stream)
     return report
 
@@ -410,23 +499,54 @@ def _print_collisions(collisions: list[dict], stream: TextIO) -> None:
         )
 
 
+def _print_outliers(outliers: list[dict], stream: TextIO) -> None:
+    if not outliers:
+        print("Oversized PDF outliers: none.", file=stream)
+        return
+    total_bytes = sum(item["size_bytes"] for item in outliers)
+    print(
+        f"Skipped oversized PDF outliers (>500 MB): {len(outliers)} "
+        f"({format_size(total_bytes)} total).",
+        file=stream,
+    )
+    for outlier in outliers:
+        print(
+            f"  {outlier['path']}: {format_size(outlier['size_bytes'])}",
+            file=stream,
+        )
+
+
 def _print_size_summary(report: dict, stream: TextIO) -> None:
     print(
         f"Source: {report['source_pdf_count']} PDFs, "
-        f"{report['source_total_bytes']} bytes.",
+        f"{format_size(report['source_total_bytes'])}.",
         file=stream,
     )
     print(
-        f"Unique: {report['unique_count']} PDFs, {report['unique_total_bytes']} bytes "
-        f"(would save "
-        f"{report['source_total_bytes'] - report['unique_total_bytes']} bytes).",
+        f"Eligible source: {report['eligible_pdf_count']} PDFs, "
+        f"{format_size(report['eligible_total_bytes'])}.",
+        file=stream,
+    )
+    print(
+        f"Unique: {report['unique_count']} PDFs, "
+        f"{format_size(report['unique_total_bytes'])} (would save "
+        f"{format_size(report['eligible_total_bytes'] - report['unique_total_bytes'])}).",
         file=stream,
     )
     print(
         f"Copyable: {report['copied_pdf_count']} PDFs, "
-        f"{report['copied_total_bytes']} bytes.",
+        f"{format_size(report['copied_total_bytes'])}.",
         file=stream,
     )
+
+
+def format_size(size_bytes: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    size = float(size_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
 
 
 def main() -> int:
