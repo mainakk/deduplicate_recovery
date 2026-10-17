@@ -12,7 +12,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Callable, Optional, TextIO
 
 CONFIG_NAME = "config.json"
 DEFAULT_REPORT_NAME = "deduplication_report.json"
@@ -20,6 +20,7 @@ DEFAULT_CACHE_NAME = "pdf_hash_cache.sqlite3"
 PROGRESS_INTERVAL = 100
 CHUNK_SIZE = 1024 * 1024
 MAX_PDF_SIZE_BYTES = 500_000_000
+COPY_PROGRESS_BYTES = 50 * 1024 * 1024
 
 
 class ConfigurationError(ValueError):
@@ -276,12 +277,23 @@ def output_name_for(relative_path: str) -> str:
     return relative_path.replace("/", "_")
 
 
-def _copy_and_hash(source: Path, destination: Path) -> str:
+def _copy_and_hash(
+    source: Path,
+    destination: Path,
+    progress: Optional[Callable[[int], None]] = None,
+) -> str:
     digest = hashlib.sha256()
+    bytes_since_update = 0
+    bytes_copied = 0
     with source.open("rb") as input_stream, destination.open("xb") as output_stream:
         while chunk := input_stream.read(CHUNK_SIZE):
             output_stream.write(chunk)
             digest.update(chunk)
+            bytes_copied += len(chunk)
+            bytes_since_update += len(chunk)
+            if progress is not None and bytes_since_update >= COPY_PROGRESS_BYTES:
+                progress(bytes_copied)
+                bytes_since_update = 0
         output_stream.flush()
         os.fsync(output_stream.fileno())
     return digest.hexdigest()
@@ -443,17 +455,54 @@ def run_deduplication(
     )
     committed_destination = False
     try:
-        for group in report_groups:
-            if group["filename_collision"]:
-                continue
+        copy_groups = [
+            group for group in report_groups if not group["filename_collision"]
+        ]
+        print(
+            f"Copying {len(copy_groups)} unique PDFs "
+            f"({format_size(report['copied_total_bytes'])})...",
+            file=progress_stream,
+            flush=True,
+        )
+        staged_count = 0
+        staged_bytes = 0
+        for group in copy_groups:
             source = config.source_dir / group["copied_from"]
             target = stage_dir / group["copied_to"]
-            copied_hash = _copy_and_hash(source, target)
+            current_size = sizes[group["copied_from"]]
+
+            def report_byte_progress(file_bytes: int) -> None:
+                print(
+                    f"Copying {staged_count + 1}/{len(copy_groups)} PDFs; "
+                    f"{group['copied_from']}: {format_size(file_bytes)} / "
+                    f"{format_size(current_size)}; staged "
+                    f"{format_size(staged_bytes + file_bytes)} total.",
+                    file=progress_stream,
+                    flush=True,
+                )
+
+            copied_hash = _copy_and_hash(source, target, report_byte_progress)
             if copied_hash != group["sha256"]:
                 raise OSError(
                     f"Source changed while copying {group['copied_from']}; "
                     "the destination was not committed"
                 )
+            staged_count += 1
+            staged_bytes += current_size
+            if staged_count % PROGRESS_INTERVAL == 0 or staged_count == len(copy_groups):
+                print(
+                    f"Copy progress: {staged_count}/{len(copy_groups)} unique PDFs "
+                    f"staged; {format_size(staged_bytes)} total.",
+                    file=progress_stream,
+                    flush=True,
+                )
+
+        if not copy_groups:
+            print(
+                "Copy progress: 0/0 unique PDFs staged; 0 B total.",
+                file=progress_stream,
+                flush=True,
+            )
 
         if os.path.lexists(config.destination_dir):
             raise ConfigurationError(

@@ -172,6 +172,37 @@ class DeduplicationTests(unittest.TestCase):
         )
         self.assertLess(marker_index, copied_index)
 
+    def test_copy_stage_reports_start_file_progress_and_completion(self):
+        (self.source / "a.pdf").write_bytes(b"12345678")
+        output = io.StringIO()
+
+        with patch("deduplicate.COPY_PROGRESS_BYTES", 3):
+            run_deduplication(self.config(), output)
+
+        lines = output.getvalue().splitlines()
+        self.assertIn("Copying 1 unique PDFs (8 B)...", lines)
+        self.assertTrue(any(
+            line.startswith("Copying 1/1 PDFs; a.pdf: 8 B / 8 B; staged 8 B total.")
+            for line in lines
+        ))
+        self.assertIn("Copy progress: 1/1 unique PDFs staged; 8 B total.", lines)
+
+    def test_copy_stage_reports_zero_when_every_unique_name_collides(self):
+        (self.source / "A").mkdir()
+        (self.source / "A" / "x.pdf").write_bytes(b"one")
+        (self.source / "A_x.pdf").write_bytes(b"two")
+        output = io.StringIO()
+
+        report = run_deduplication(self.config(), output)
+
+        self.assertEqual(report["copied_pdf_count"], 0)
+        self.assertIn("Copying 0 unique PDFs (0 B)...", output.getvalue())
+        self.assertIn(
+            "Copy progress: 0/0 unique PDFs staged; 0 B total.",
+            output.getvalue(),
+        )
+        self.assertTrue(self.destination.is_dir())
+
     def test_dry_run_reports_periodic_progress_for_large_input(self):
         for index in range(101):
             (self.source / f"{index:03}.pdf").write_bytes(f"content {index}".encode())

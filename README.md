@@ -56,6 +56,9 @@ in addition to storing these totals in the JSON report.
 Both modes print a flushed `Hashing complete` marker after all PDFs have been
 hashed (or matched from cache) and collision groups determined. In normal mode
 this appears before copying begins.
+During normal copying, the script reports staged-file counts and total bytes
+every 100 copied PDFs and at the end; it also prints per-file byte progress
+every 50 MiB while copying a large eligible PDF.
 
 The verifier uses the same config and report to compare every source PDF with
 the report and copied file, confirm hash groups and deterministic names, and
